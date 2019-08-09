@@ -5,19 +5,24 @@ class BayesFilter():
     def __init__(self, args):
 
         # Placeholder for data -- inputs are number of elements x pts in mesh x dimensionality of data for each point
+        # RpB: 2 times the sequence length because 32 steps of reconstruction and 32 steps of filtering
         self.x = tf.Variable(np.zeros((2*args.batch_size*args.seq_length, args.state_dim), dtype=np.float32), trainable=False, name="state_values")
         self.u = tf.Variable(np.zeros((args.batch_size, 2*args.seq_length-1, args.action_dim), dtype=np.float32), trainable=False, name="action_values")
 
         # Parameters to be set externally
+        # RpB: kl_weight controls the relative weighting between the two terms in eqn 11 of dvbf
+        # When kl weight high then the prediction is better but reconstruction not as sharp
         self.learning_rate = tf.Variable(0.0, trainable=False, name="learning_rate")
         self.kl_weight = tf.Variable(0.0, trainable=False, name="kl_weight")
 
         # Normalization parameters to be stored
+        # RpB: Helpers to standardize normal distribution
         self.shift = tf.Variable(np.zeros(args.state_dim), trainable=False, name="input_shift", dtype=tf.float32)
         self.scale = tf.Variable(np.zeros(args.state_dim), trainable=False, name="input_scale", dtype=tf.float32)
         self.shift_u = tf.Variable(np.zeros(args.action_dim), trainable=False, name="action_shift", dtype=tf.float32)
         self.scale_u = tf.Variable(np.zeros(args.action_dim), trainable=False, name="action_scale", dtype=tf.float32)
         self.generative = tf.Variable(False, trainable=False, name="generate_flag")
+        # RpB: The above is a flag that says whether we will use for prediction or just reconstruction
         
         # Create the computational graph
         self._create_feature_extractor_params(args)
@@ -30,7 +35,7 @@ class BayesFilter():
         self._create_decoder_params(args)
         self._create_optimizer(args)
 
-    # Create parameters to comprise inference network
+    # Create parameters to comprise feature extractor network
     def _create_feature_extractor_params(self, args):
         self.extractor_w = []
         self.extractor_b = []
@@ -51,6 +56,7 @@ class BayesFilter():
         self.extractor_b.append(tf.get_variable("extractor_b_end", [args.code_dim]))
 
     # Function to run inputs through extractor
+    # RpB: Maps inputs to feature space. Recall Di Wu embedding space discussion
     def _get_extractor_output(self, args, states):
         extractor_input = states
         for i in range(len(args.extractor_size)):
@@ -69,11 +75,12 @@ class BayesFilter():
         w_std = tf.exp(w_logstd) + 1e-3
         samples = tf.random_normal([args.batch_size, args.noise_dim])
         w = samples*w_std + w_mean
-        w = tf.minimum(tf.maximum(w, -10.0), 10.0)
+        w = tf.minimum(tf.maximum(w, -10.0), 10.0) # RpB: Hack that helps
         w = tf.cond(self.generative, lambda: samples, lambda: w)  # Just sample from prior for generative model
         return w
 
     # Bidirectional LSTM to generate initial sample of w1, then form z1 from w1
+    # RpB: From the appendix B.3 of dvbf. See initial network w1
     def _create_initial_generator(self, args):
         fwd_cell = tf.nn.rnn_cell.LSTMCell(args.rnn_size, initializer=tf.contrib.layers.xavier_initializer())
         bwd_cell = tf.nn.rnn_cell.LSTMCell(args.rnn_size, initializer=tf.contrib.layers.xavier_initializer())
@@ -107,6 +114,7 @@ class BayesFilter():
                                 kernel_regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight))
 
     # Initialize potential transition matrices
+    # RpB: These are the A,B,C matrices in section 3.3 dvbf
     def _create_transition_matrices(self, args):
         self.A_matrices = tf.get_variable("A_matrices", [args.num_matrices, args.code_dim, args.code_dim], 
                                             regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight))
@@ -132,6 +140,7 @@ class BayesFilter():
                                             regularizer=tf.contrib.layers.l2_regularizer(args.reg_weight)))
 
     # Create parameters to comprise inference network
+    # RpB: See appendix B.3 recognition model
     def _create_inference_network_params(self, args):
         self.inference_w = []
         self.inference_b = []
@@ -153,10 +162,13 @@ class BayesFilter():
 
     # Function to get weights for transition matrices
     def _get_weights(self, z):
+        # RpB: A neural net to get the weights i.e. the alpahs in section 3.3 dvbf
+        # RpB: Softmax because there are more than 2 alphas
         hidden = tf.nn.relu(tf.nn.xw_plus_b(z, self.weight_w[0], self.weight_b[0]))
         return tf.nn.softmax(tf.nn.xw_plus_b(hidden, self.weight_w[1], self.weight_b[1]))
 
     # Function to generate w sample from inference network
+    # RpB: See appendix B.3 from DVBF under recognition model. We are doing q(wt|zt,xt+1,ut)
     def _get_inference_sample(self, args, features, z):
         inference_input = tf.concat([features, z], axis=1)
         for i in range(len(args.inference_size)):
@@ -202,6 +214,7 @@ class BayesFilter():
             self.z_pred.append(z_t)
 
         # Remove this part to have alg from paper
+        # RpB: You will accordingly have to also modify the sequence length input
         for t in range(args.seq_length, 2*args.seq_length):
             # Find A, B, and C matrices
             weights = self._get_weights(tf.squeeze(z_t, axis=1))
